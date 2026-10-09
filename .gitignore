@@ -1,0 +1,4 @@
+fot
+*.dat
+*.tmp
+__pycache__/
