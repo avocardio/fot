@@ -3,9 +3,7 @@
 A text transform that makes standard compressors both smaller and faster. `fot` segments text into the
 vocabulary of a pretrained BPE tokenizer (OpenAI's cl100k by default), replaces each token by its frequency rank
 from a fixed table, and writes the ranks with a byte-oriented prefix code (ranks below 128 take one byte). The
-result is about 40% of the text's size and is then compressed with zstd, xz, brotli, zlib or bzip2. With xz, `fot` sets
-a new state of the art among LZ-based compressors on the
-[Large Text Compression Benchmark](https://mattmahoney.net/dc/text.html) (enwik9).
+result is about 40% of the text's size and is then compressed with zstd, xz, brotli, zlib or bzip2.
 
 enwik8 (100 MB), one core, times include the transform:
 
@@ -16,9 +14,10 @@ enwik8 (100 MB), one core, times include the transform:
 | zstd-22    | 25.33% | **23.89%**   | 86.8 s   | **17.2 s**   |
 | brotli-11  | 25.74% | **23.78%**   | 170.8 s  | **94.5 s**   |
 
-On enwik9, `fot` followed by xz (`--lzma2=preset=9e,lc=4,pb=0`, dictionary at least the stream size) gives
-189,382,412 bytes, or 189,923,156 including our decompressor, vocabulary and table, below every LZ-based entry on
-the [Large Text Compression Benchmark](https://mattmahoney.net/dc/text.html). The static table was learned from part
+On enwik9, `fot` sets a new state of the art among LZ-based compressors on the
+[Large Text Compression Benchmark](https://mattmahoney.net/dc/text.html): followed by xz
+(`--lzma2=preset=9e,lc=4,pb=0`, dictionary at least the stream size) it gives 189,382,412 bytes, or 189,923,156
+including our decompressor, vocabulary and table. The static table was learned from part
 of enwik9; the benchmark allows this because the table counts toward the decompressor size. To reproduce:
 
 ```
