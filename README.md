@@ -7,12 +7,12 @@ result is about 40% of the text's size and is then compressed with zstd, xz, bro
 
 enwik8 (100 MB), one core, times include the transform:
 
-| compressor | raw        | fot        | raw time | fot time |
-|------------|------------|------------|----------|----------|
-| zlib-9     | 36.48%     | 28.52%     | 4.1 s    | 2.6 s    |
-| xz-6       | 26.38%     | 24.14%     | 58.8 s   | 18.2 s   |
-| zstd-22    | 25.33%     | 23.89%     | 86.8 s   | 17.2 s   |
-| brotli-11  | 25.74%     | 23.78%     | 170.8 s  | 94.5 s   |
+| compressor | raw    | fot        | raw time | fot time   |
+|------------|--------|------------|----------|------------|
+| zlib-9     | 36.48% | **28.52%**   | 4.1 s    | **2.6 s**    |
+| xz-6       | 26.38% | **24.14%**   | 58.8 s   | **18.2 s**   |
+| zstd-22    | 25.33% | **23.89%**   | 86.8 s   | **17.2 s**   |
+| brotli-11  | 25.74% | **23.78%**   | 170.8 s  | **94.5 s**   |
 
 On enwik9, `fot` followed by xz (`--lzma2=preset=9e,lc=4,pb=0`, dictionary at least the stream size) gives
 189,382,412 bytes, or 189,923,156 including our decompressor, vocabulary and table, below every LZ-based entry on
