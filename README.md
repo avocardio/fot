@@ -3,7 +3,9 @@
 A text transform that makes standard compressors both smaller and faster. `fot` segments text into the
 vocabulary of a pretrained BPE tokenizer (OpenAI's cl100k by default), replaces each token by its frequency rank
 from a fixed table, and writes the ranks with a byte-oriented prefix code (ranks below 128 take one byte). The
-result is about 40% of the text's size and is then compressed with zstd, xz, brotli, zlib or bzip2.
+result is about 40% of the text's size and is then compressed with zstd, xz, brotli, zlib or bzip2. With xz, `fot` sets
+a new state of the art among LZ-based compressors on the
+[Large Text Compression Benchmark](https://mattmahoney.net/dc/text.html) (enwik9).
 
 enwik8 (100 MB), one core, times include the transform:
 
