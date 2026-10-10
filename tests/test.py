@@ -62,5 +62,40 @@ for cut in (1, 2, 7):
     open(f'{tmp}/bad.fot', 'wb').write(good[:-cut])
     check(run(f'{FOT} dec -q {tmp}/bad.fot {tmp}/x.out').returncode == 1, f'truncated by {cut}')
 
+# crafted corrupt streams must be rejected with exit code 1, never crash
+def varint(x):
+    out = bytearray()
+    while x >= 0x80: out.append(x & 0x7f | 0x80); x >>= 7
+    out.append(x); return bytes(out)
+
+def parse(path):   # FOTC container with codec none around a FOT1 stream
+    b = open(path, 'rb').read(); i = 7
+    def rv():
+        nonlocal i; x = sh = 0
+        while True:
+            c = b[i]; i += 1; x |= (c & 0x7f) << sh; sh += 7
+            if not c & 0x80: return x
+    rv(); fixed = b[i:i + 14]; i += 14
+    size, nb, K = rv(), rv(), rv(); ids = [rv() for _ in range(K)]
+    blocks = [(rv(), rv(), rv()) for _ in range(nb)]
+    return b[:7], fixed, size, nb, ids, blocks, b[i:]
+
+def build(path, head, fixed, size, nb, ids, blocks, streams, raw=None):
+    body = fixed + varint(size) + varint(nb) + varint(len(ids)) + b''.join(map(varint, ids))
+    body += b''.join(varint(x) for blk in blocks for x in blk) + streams
+    open(path, 'wb').write(head + varint(len(body) if raw is None else raw) + body)
+
+run(f'{FOT} enc -q -c none -K 16 -B 5000 {tmp}/text.in {tmp}/ok.fot')
+head, fixed, size, nb, ids, blocks, streams = parse(f'{tmp}/ok.fot')
+check(nb >= 2 and len(ids) == 16, 'test setup')
+bad = {'duplicate ids': (size, nb, [ids[0]] * len(ids), blocks, None),
+       'huge block count': (size, 1 << 40, ids, blocks, None),
+       'wrapping block sizes': (0, 2, ids, [(1, blocks[0][1], 1 << 63), (1, blocks[1][1], 1 << 63)], None),
+       'huge declared size': (size, nb, ids, blocks, 1 << 63)}
+for name, (t_, nb_, ids_, blocks_, raw) in bad.items():
+    build(f'{tmp}/bad.fot', head, fixed, t_, nb_, ids_, blocks_, streams, raw)
+    check(run(f'{FOT} dec -q {tmp}/bad.fot {tmp}/x.out').returncode == 1, f'corrupt stream: {name}')
+check(run(f'{FOT} enc -q -B 0 {tmp}/text.in {tmp}/x.fot').returncode == 1, 'block size 0 rejected')
+
 print(f'{total - fails} passed, {fails} failed')
 sys.exit(1 if fails else 0)

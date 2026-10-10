@@ -23,13 +23,17 @@ static void die(const char *msg) {
     exit(1);
 }
 
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("out of memory"); return p; }
+static void *xrealloc(void *q, size_t n) { void *p = realloc(q, n ? n : 1); if (!p) die("out of memory"); return p; }
+
 static uint8_t *read_all(const char *path, size_t *n) {
     FILE *f = strcmp(path, "-") ? fopen(path, "rb") : stdin;
     if (!f) die("cannot open input");
     size_t cap = 1 << 20, len = 0, r;
-    uint8_t *b = malloc(cap);
+    uint8_t *b = xmalloc(cap);
     while ((r = fread(b + len, 1, cap - len, f)) > 0)
-        if ((len += r) == cap) b = realloc(b, cap *= 2);
+        if ((len += r) == cap) b = xrealloc(b, cap *= 2);
+    if (ferror(f)) die("read error");
     if (f != stdin) fclose(f);
     *n = len;
     return b;
@@ -50,9 +54,12 @@ static const char *codec_names[C_COUNT] = { "none", "zstd", "xz", "xze", "brotli
 static int parse_codec(const char *s, int *level) {
     const char *colon = strchr(s, ':');
     size_t len = colon ? (size_t)(colon - s) : strlen(s);
-    *level = colon ? atoi(colon + 1) : -1;
+    static const int default_level[C_COUNT] = { 0, 3, 6, 6, 11, 6, 9 };
     for (int i = 0; i < C_COUNT; i++)
-        if (strlen(codec_names[i]) == len && !strncmp(s, codec_names[i], len)) return i;
+        if (strlen(codec_names[i]) == len && !strncmp(s, codec_names[i], len)) {
+            *level = colon ? atoi(colon + 1) : default_level[i];
+            return i;
+        }
     die("unknown codec (zstd|xz|xze|brotli|zlib|bz2|none)");
     return 0;
 }
@@ -62,15 +69,15 @@ static uint8_t *codec_compress(int codec, int level, int wbits, int threads, con
     uint8_t *o = NULL;
     switch (codec) {
     case C_NONE:
-        o = malloc(n + 1);
+        o = xmalloc(n + 1);
         memcpy(o, in, n);
         *out_n = n;
         break;
     case C_ZSTD: {
         size_t cap = ZSTD_compressBound(n);
-        o = malloc(cap);
+        o = xmalloc(cap);
         ZSTD_CCtx *c = ZSTD_createCCtx();
-        ZSTD_CCtx_setParameter(c, ZSTD_c_compressionLevel, level < 0 ? 3 : level);
+        ZSTD_CCtx_setParameter(c, ZSTD_c_compressionLevel, level);
         if (threads > 1) ZSTD_CCtx_setParameter(c, ZSTD_c_nbWorkers, threads);
         if (wbits) ZSTD_CCtx_setParameter(c, ZSTD_c_windowLog, wbits);
         size_t r = ZSTD_compress2(c, o, cap, in, n);
@@ -83,7 +90,7 @@ static uint8_t *codec_compress(int codec, int level, int wbits, int threads, con
     case C_XZE: {
         uint32_t preset = (uint32_t)(level < 0 ? 6 : level) | (codec == C_XZE ? LZMA_PRESET_EXTREME : 0);
         size_t cap = lzma_stream_buffer_bound(n), pos = 0;
-        o = malloc(cap);
+        o = xmalloc(cap);
         if (lzma_easy_buffer_encode(preset, LZMA_CHECK_CRC64, NULL, in, n, o, &pos, cap) != LZMA_OK) die("xz failed");
         *out_n = pos;
         break;
@@ -91,7 +98,7 @@ static uint8_t *codec_compress(int codec, int level, int wbits, int threads, con
     case C_BROTLI: {
         if (!wbits) wbits = 24;
         size_t cap = BrotliEncoderMaxCompressedSize(n) + 64, avail_in = n, avail_out = cap;
-        o = malloc(cap);
+        o = xmalloc(cap);
         const uint8_t *ip = in;
         uint8_t *op = o;
         BrotliEncoderState *s = BrotliEncoderCreateInstance(NULL, NULL, NULL);
@@ -107,14 +114,15 @@ static uint8_t *codec_compress(int codec, int level, int wbits, int threads, con
     }
     case C_ZLIB: {
         uLongf len = compressBound(n);
-        o = malloc(len);
+        o = xmalloc(len);
         if (compress2(o, &len, in, n, level < 0 ? 6 : level) != Z_OK) die("zlib failed");
         *out_n = len;
         break;
     }
     case C_BZ2: {
+        if (n > (UINT32_MAX - 600) / 1.01) die("bz2 is limited to inputs below 4 GB");
         unsigned len = (unsigned)(n * 1.01 + 600);
-        o = malloc(len);
+        o = xmalloc(len);
         if (BZ2_bzBuffToBuffCompress((char *)o, &len, (char *)in, (unsigned)n, level < 0 ? 9 : level, 0, 30) != BZ_OK) die("bz2 failed");
         *out_n = len;
         break;
@@ -124,14 +132,17 @@ static uint8_t *codec_compress(int codec, int level, int wbits, int threads, con
 }
 
 static uint8_t *codec_decompress(int codec, int wbits, const uint8_t *in, size_t n, size_t raw) {
-    uint8_t *o = malloc(raw + 1);
+    uint8_t *o = xmalloc(raw + 1);
     switch (codec) {
     case C_NONE:
         if (n != raw) die("corrupt file");
         memcpy(o, in, n);
         break;
     case C_ZSTD: {
-        size_t r = ZSTD_decompress(o, raw, in, n);
+        ZSTD_DCtx *c = ZSTD_createDCtx();
+        if (wbits) ZSTD_DCtx_setParameter(c, ZSTD_d_windowLogMax, wbits);
+        size_t r = ZSTD_decompressDCtx(c, o, raw, in, n);
+        ZSTD_freeDCtx(c);
         if (ZSTD_isError(r) || r != raw) die("zstd decompression failed");
         break;
     }
@@ -159,6 +170,7 @@ static uint8_t *codec_decompress(int codec, int wbits, const uint8_t *in, size_t
         break;
     }
     case C_BZ2: {
+        if (raw > UINT32_MAX) die("corrupt file");
         unsigned len = (unsigned)raw;
         if (BZ2_bzBuffToBuffDecompress((char *)o, &len, (char *)in, (unsigned)n, 0, 0) != BZ_OK || len != raw) die("bz2 decompression failed");
         break;
@@ -259,10 +271,10 @@ static int encode(const char *cmd, const char *src, const char *dst, const char 
     size_t out_n = cn + (q - hdr);
     if (!quiet)
         fprintf(stderr, "%s:%d %.3fs | total %.3fs (%.1f MB/s) | %zu -> %zu bytes = %.4f%%\n", codec_names[codec], level,
-                t_c, t_tr + t_c, n / 1e6 / (t_tr + t_c), n, out_n, 100.0 * out_n / n);
+                t_c, t_tr + t_c, n / 1e6 / (t_tr + t_c), n, out_n, n ? 100.0 * out_n / n : 0.0);
     if (f != stdout)   // machine-readable summary for tools/bench.py
         printf("%s\t%s\t%d\t%zu\t%zu\t%.6f\t%.4f\t%.4f\t%.4f\n", cmd, codec_names[codec], level, n, out_n,
-               100.0 * out_n / n, t_tr, t_c, t_read);
+               n ? 100.0 * out_n / n : 0.0, t_tr, t_c, t_read);
     free(c);
     if (tr != in) free(tr);
     free(in);
@@ -281,6 +293,7 @@ static int decode(const char *cmd, const char *src, const char *dst, const char 
         raw |= (uint64_t)(*q & 0x7f) << s;
         if (!(*q++ & 0x80)) break;
     }
+    if (raw > SIZE_MAX / 2) die("corrupt file");
     double t0 = now();
     uint8_t *d = codec_decompress(codec, wbits, q, (size_t)(end - q), raw), *out = d;
     double t_d = now() - t0, t_tr = 0;
@@ -313,7 +326,7 @@ static int build_table(int argc, char **argv, const char *vocab, const char *tab
     for (int i = 0; i < argc; i++) {
         size_t n;
         uint8_t *in = read_all(argv[i], &n);
-        uint32_t *tok = malloc(n * 4 + 4);
+        uint32_t *tok = xmalloc(n * 4 + 4);
         size_t m = fot_tokenize(v, t, p, in, n, tok);
         for (size_t j = 0; j < m; j++) cnt[tok[j]]++;
         free(tok);
@@ -340,7 +353,7 @@ int main(int argc, char **argv) {
         case 'K': p.K = (uint32_t)atoi(optarg); p.map = FOT_MAP_HYBRID; break;
         case 'e': p.varint = pick(optarg, codes, 2); break;
         case 't': p.T = atoi(optarg); break;
-        case 'B': p.block = (uint32_t)atoi(optarg); break;
+        case 'B': { long b = strtol(optarg, NULL, 10); if (b < 1 || b > 1L << 30) die("block size must be 1 to 2^30 bytes"); p.block = (uint32_t)b; break; }
         case 'c': codec_arg = optarg; break;
         case 'w': wbits = atoi(optarg); break;
         case 'j': p.threads = atoi(optarg); break;

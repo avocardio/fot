@@ -1,5 +1,6 @@
 CC ?= cc
-CFLAGS ?= -O3 -march=native -std=gnu11 -Wall -Wextra -fopenmp
+CFLAGS ?= -O3 -march=native -Wall -Wextra
+override CFLAGS += -std=gnu11 -fopenmp
 LDLIBS = -lzstd -llzma -lz -lbz2 -lbrotlienc -lbrotlidec -lm
 
 fot: fot.c main.c fot.h

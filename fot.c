@@ -11,6 +11,10 @@
 #define ROOT 1
 #define DIE(...) do { fprintf(stderr, "fot: " __VA_ARGS__); fputc('\n', stderr); exit(1); } while (0)
 
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) DIE("out of memory"); return p; }
+static void *xcalloc(size_t n, size_t k) { void *p = calloc(n ? n : 1, k ? k : 1); if (!p) DIE("out of memory"); return p; }
+static void *xrealloc(void *q, size_t n) { void *p = realloc(q, n ? n : 1); if (!p) DIE("out of memory"); return p; }
+
 static uint32_t fnv(const uint8_t *p, size_t n) {
     uint32_t h = 2166136261u;
     for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
@@ -23,7 +27,7 @@ static uint8_t *read_file(const char *path, size_t *n) {
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    uint8_t *b = malloc(sz + 16);
+    uint8_t *b = xmalloc(sz + 16);
     if (fread(b, 1, sz, f) != (size_t)sz) DIE("short read %s", path);
     fclose(f);
     *n = sz;
@@ -69,11 +73,11 @@ static void build_trie(fot_vocab *v) {
     // 1. explicit trie: child map, token at each node, child bitmap per node
     uint64_t cap = 1;
     while (cap < (uint64_t)v->n * 16) cap <<= 1;
-    hmap h = { malloc(cap * sizeof(hent)), cap - 1 };
+    hmap h = { xmalloc(cap * sizeof(hent)), cap - 1 };
     memset(h.e, 0xff, cap * sizeof(hent));
     uint32_t nn = 1, ncap = v->n * 8;
-    int32_t *term = malloc(ncap * 4);
-    uint8_t *kids = calloc(ncap * 32, 1);
+    int32_t *term = xmalloc(ncap * 4);
+    uint8_t *kids = xcalloc(ncap * 32, 1);
     term[0] = -1;
     for (uint32_t i = 0; i < v->n; i++) {
         uint32_t s = 0;
@@ -83,8 +87,8 @@ static void build_trie(fot_vocab *v) {
             if (*c == UINT32_MAX) {
                 if (nn == ncap) {
                     ncap *= 2;
-                    term = realloc(term, ncap * 4);
-                    kids = realloc(kids, ncap * 32);
+                    term = xrealloc(term, ncap * 4);
+                    kids = xrealloc(kids, ncap * 32);
                     memset(kids + nn * 32, 0, (ncap - nn) * 32);
                 }
                 *c = nn;
@@ -98,9 +102,9 @@ static void build_trie(fot_vocab *v) {
     }
     // 2. double array: place each node's children (BFS order) at base + byte in the first free slots
     uint32_t dn = 1u << 22;
-    int32_t *base = malloc(dn * 4), *check = malloc(dn * 4), *tok = malloc(dn * 4);
+    int32_t *base = xmalloc(dn * 4), *check = xmalloc(dn * 4), *tok = xmalloc(dn * 4);
     for (uint32_t i = 0; i < dn; i++) { base[i] = 0; check[i] = -1; tok[i] = -1; }
-    uint32_t *slot = malloc(nn * 4), *queue = malloc(nn * 4), qh = 0, qt = 0, first_free = 2;
+    uint32_t *slot = xmalloc(nn * 4), *queue = xmalloc(nn * 4), qh = 0, qt = 0, first_free = 2;
     int32_t maxused = ROOT;
     check[ROOT] = 0;
     slot[0] = ROOT;
@@ -119,7 +123,7 @@ static void build_trie(fot_vocab *v) {
             if (f + 256 >= dn) {
                 uint32_t od = dn;
                 dn *= 2;
-                base = realloc(base, dn * 4); check = realloc(check, dn * 4); tok = realloc(tok, dn * 4);
+                base = xrealloc(base, dn * 4); check = xrealloc(check, dn * 4); tok = xrealloc(tok, dn * 4);
                 for (uint32_t i = od; i < dn; i++) { base[i] = 0; check[i] = -1; tok[i] = -1; }
             }
             if (check[f] >= 0 || (int64_t)f - c[0] < 1) continue;
@@ -139,13 +143,24 @@ static void build_trie(fot_vocab *v) {
         }
     }
     v->dat_n = (uint32_t)maxused + 257;
-    v->dat = malloc((size_t)v->dat_n * 12);
+    v->dat = xmalloc((size_t)v->dat_n * 12);
     for (uint32_t i = 0; i < v->dat_n; i++) {
         v->dat[3 * i] = check[i];
         v->dat[3 * i + 1] = base[i];
         v->dat[3 * i + 2] = tok[i];
     }
     free(base); free(check); free(tok); free(h.e); free(term); free(kids); free(slot); free(queue);
+}
+
+// every transition stays inside the array and every token id is valid
+static int trie_ok(const fot_vocab *v) {
+    const int32_t *d = v->dat;
+    for (uint32_t i = 0; i < v->dat_n; i++) {
+        int32_t chk = d[3 * i], base = d[3 * i + 1], tok = d[3 * i + 2];
+        if (chk < -1 || chk >= (int32_t)v->dat_n || base < 0 || (int64_t)base + 256 > (int64_t)v->dat_n
+            || tok < -1 || tok >= (int32_t)v->n) return 0;
+    }
+    return 1;
 }
 
 // the trie build takes ~0.2 s, so it is cached next to the vocab file (best effort, keyed by vocab hash)
@@ -156,9 +171,10 @@ static void load_or_build_trie(fot_vocab *v, const char *path) {
     uint8_t *c = read_file(cpath, &cn);
     if (c && cn >= 12 && !memcmp(c, "FOTD", 4) && !memcmp(c + 4, &v->hash, 4)) {
         memcpy(&v->dat_n, c + 8, 4);
-        if (cn == 12 + (size_t)v->dat_n * 12) {
-            v->dat = malloc((size_t)v->dat_n * 12);
+        if (cn == 12 + (size_t)v->dat_n * 12 && v->dat_n > 257) {
+            v->dat = xmalloc((size_t)v->dat_n * 12);
             memcpy(v->dat, c + 12, (size_t)v->dat_n * 12);
+            if (!trie_ok(v)) { free(v->dat); v->dat = NULL; }   // stale or corrupt cache: rebuild
         }
     }
     free(c);
@@ -180,11 +196,12 @@ fot_vocab *fot_vocab_load(const char *path) {
     uint8_t *b = read_file(path, &n);
     if (!b) DIE("cannot open vocab %s", path);
     if (n < 8 || memcmp(b, "FOTV", 4)) DIE("bad vocab file %s", path);
-    fot_vocab *v = calloc(1, sizeof *v);
+    fot_vocab *v = xcalloc(1, sizeof *v);
     memcpy(&v->n, b + 4, 4);
-    v->lens = malloc(v->n);
-    v->offs = malloc(v->n * 4);
-    v->bytes = malloc(n + 16);
+    if (v->n < 256 || v->n > (n - 8) / 2) DIE("bad vocab file %s", path);   // each token takes >= 2 bytes
+    v->lens = xmalloc(v->n);
+    v->offs = xmalloc(v->n * 4);
+    v->bytes = xmalloc(n + 16);
     size_t p = 8, o = 0;
     int seen[256] = {0};
     for (uint32_t i = 0; i < v->n; i++) {
@@ -206,7 +223,7 @@ fot_vocab *fot_vocab_load(const char *path) {
     free(b);
     load_or_build_trie(v, path);
     const int32_t *d = v->dat;
-    v->tab2 = malloc(65536 * 4);
+    v->tab2 = xmalloc(65536 * 4);
     for (int a = 0; a < 256; a++) {
         int32_t s1 = d[3 * ROOT + 1] + a;
         for (int c = 0; c < 256; c++) {
@@ -228,14 +245,14 @@ fot_table *fot_table_load(const char *path) {
     uint8_t *b = read_file(path, &n);
     if (!b) DIE("cannot open table %s", path);
     if (n < 8 || memcmp(b, "FOTT", 4)) DIE("bad table file %s", path);
-    fot_table *t = calloc(1, sizeof *t);
+    fot_table *t = xcalloc(1, sizeof *t);
     memcpy(&t->n, b + 4, 4);
     if (n != 8 + (size_t)t->n * 4) DIE("bad table size");
-    t->order = malloc(t->n * 4);
+    t->order = xmalloc(t->n * 4);
     memcpy(t->order, b + 8, t->n * 4);
     t->hash = fnv(b, n);
     free(b);
-    uint8_t *seen = calloc(t->n, 1);
+    uint8_t *seen = xcalloc(t->n, 1);
     for (uint32_t i = 0; i < t->n; i++) {
         if (t->order[i] >= t->n || seen[t->order[i]]) DIE("table %s is not a permutation", path);
         seen[t->order[i]] = 1;
@@ -255,7 +272,7 @@ static int by_count(const void *a, const void *b) {   // count descending, then 
     return x->id < y->id ? -1 : x->id > y->id;
 }
 static void sort_by_count(uint32_t *ids, uint32_t n, const uint64_t *counts) {
-    count_id *a = malloc((size_t)n * sizeof(count_id) + 1);
+    count_id *a = xmalloc((size_t)n * sizeof(count_id) + 1);
     for (uint32_t i = 0; i < n; i++) a[i] = (count_id){ counts[ids[i]], ids[i] };
     qsort(a, n, sizeof(count_id), by_count);
     for (uint32_t i = 0; i < n; i++) ids[i] = a[i].id;
@@ -263,7 +280,7 @@ static void sort_by_count(uint32_t *ids, uint32_t n, const uint64_t *counts) {
 }
 
 int fot_table_write(const char *path, const fot_vocab *v, const uint64_t *counts) {
-    uint32_t *ids = malloc(v->n * 4);
+    uint32_t *ids = xmalloc(v->n * 4);
     for (uint32_t i = 0; i < v->n; i++) ids[i] = i;
     sort_by_count(ids, v->n, counts);
     FILE *f = fopen(path, "wb");
@@ -311,10 +328,10 @@ static size_t tok_greedy2(const fot_vocab *v, const uint8_t *p, size_t n, uint32
     if (n < 4096) return tok_greedy(v, p, n, out);
     const int32_t *d = v->dat;
     size_t m = n / 2, iA = 0, iB = m, oA = 0, oB = 0, kA = 0, kB = 0, blA = 1, blB = 1;
-    uint32_t *outB = malloc((n - m) * 4 + 4), bA = v->byte_tok[p[0]], bB = v->byte_tok[p[m]];
+    uint32_t *outB = xmalloc((n - m) * 4 + 4), bA = v->byte_tok[p[0]], bB = v->byte_tok[p[m]];
     int32_t sA = ROOT, sB = ROOT;
     while (iA < m && iB < n) {
-        int32_t tA = d[3 * sA + 1] + p[iA + kA], tB = d[3 * sB + 1] + p[iB + kB];
+        int32_t tA = d[3 * sA + 1] + p[iA + kA], tB = d[3 * sB + 1] + (iB + kB < n ? p[iB + kB] : 0);
         int goA = d[3 * tA] == sA && iA + kA < m, goB = d[3 * tB] == sB && iB + kB < n;
         if (goA) {
             sA = tA; kA++;
@@ -410,7 +427,7 @@ static size_t tok_dp_cached(const fot_vocab *v, const uint16_t *cost, const uint
 
 // token cost = code length under Zipf's law given the static rank: log2(rank + 2), in 1/16 bits
 static uint16_t *make_cost(const fot_vocab *v, const fot_table *t) {
-    uint16_t *cost = malloc(v->n * 2);
+    uint16_t *cost = xmalloc(v->n * 2);
     for (uint32_t r = 0; r < v->n; r++) cost[t ? t->order[r] : r] = (uint16_t)(16.0 * log2((double)r + 2.0));
     return cost;
 }
@@ -418,8 +435,9 @@ static uint16_t *make_cost(const fot_vocab *v, const fot_table *t) {
 typedef struct { size_t off, n; uint32_t *tok; size_t ntok; } block;
 
 static block *make_blocks(size_t n, uint32_t bs, size_t *nb) {
+    if (!bs) DIE("block size must be positive");
     *nb = n ? (n + bs - 1) / bs : 0;
-    block *B = calloc(*nb + 1, sizeof(block));
+    block *B = xcalloc(*nb + 1, sizeof(block));
     for (size_t b = 0; b < *nb; b++) {
         B[b].off = b * (size_t)bs;
         B[b].n = b + 1 == *nb ? n - B[b].off : bs;
@@ -435,20 +453,21 @@ static void tokenize_blocks(const fot_vocab *v, const fot_table *t, const fot_pa
     check_table(v, t);
     int nt = p->threads > 0 ? p->threads : 1, dp = p->algo == FOT_DP;
     uint16_t *cost = dp ? make_cost(v, t) : NULL;
-    wc_ent **caches = calloc(nt, sizeof(wc_ent *));
+    wc_ent **caches = xcalloc(nt, sizeof(wc_ent *));
     #pragma omp parallel for schedule(dynamic) num_threads(nt)
     for (size_t b = 0; b < nb; b++) {
         int tid = 0;
 #ifdef _OPENMP
         tid = omp_get_thread_num();
 #endif
-        B[b].tok = malloc(B[b].n * 4 + 4);
+        B[b].tok = xmalloc(B[b].n * 4 + 4);
         if (!dp) { B[b].ntok = tok_greedy2(v, in + B[b].off, B[b].n, B[b].tok); continue; }
         if (!caches[tid]) {
             caches[tid] = aligned_alloc(64, (1u << WC_BITS) * sizeof(wc_ent));
+            if (!caches[tid]) DIE("out of memory");
             memset(caches[tid], 0, (1u << WC_BITS) * sizeof(wc_ent));
         }
-        dp_scratch sc = { malloc((B[b].n + 1) * 4), malloc((B[b].n + 1) * 4), malloc(B[b].n + 1) };
+        dp_scratch sc = { xmalloc((B[b].n + 1) * 4), xmalloc((B[b].n + 1) * 4), xmalloc(B[b].n + 1) };
         B[b].ntok = tok_dp_cached(v, cost, in + B[b].off, B[b].n, B[b].tok, &sc, caches[tid]);
         free(sc.c); free(sc.from); free(sc.len);
     }
@@ -493,7 +512,7 @@ static uint64_t stream_bytes(const uint64_t *cum, uint32_t V, int T, int E) {
 
 // rank order: the explicit list first, then the static order without the listed ids
 static void build_rank(const fot_table *t, const uint32_t *listed, uint32_t K, uint32_t *rank, uint32_t V) {
-    uint8_t *seen = calloc(V, 1);
+    uint8_t *seen = xcalloc(V, 1);
     uint32_t r = 0;
     for (uint32_t i = 0; i < K; i++) { rank[listed[i]] = r++; seen[listed[i]] = 1; }
     for (uint32_t i = 0; i < V; i++) {
@@ -516,7 +535,7 @@ static uint32_t choose_K(const fot_table *t, const fot_params *p, const uint64_t
         for (uint32_t k = 32; k < nseen; k *= 2) Ks[nK++] = k;
         Ks[nK++] = nseen;
     }
-    uint64_t *cum = malloc((V + 1) * 8), *by_rank = malloc(V * 8), best = UINT64_MAX;
+    uint64_t *cum = xmalloc((V + 1) * 8), *by_rank = xmalloc(V * 8), best = UINT64_MAX;
     for (uint32_t ki = 0; ki < nK; ki++) {
         uint32_t K = Ks[ki];
         build_rank(t, sorted, K, rank, V);
@@ -536,7 +555,7 @@ static uint32_t choose_K(const fot_table *t, const fot_params *p, const uint64_t
 
 static uint8_t *write_ranks(const uint32_t *tok, size_t ntok, const uint32_t *rank, int T, int E, size_t *len) {
     uint32_t n2 = T ? (uint32_t)(256 - T - E) * 256 : 0;
-    uint8_t *o = malloc(ntok * 4 + 16), *q = o;
+    uint8_t *o = xmalloc(ntok * 4 + 16), *q = o;
     for (size_t i = 0; i < ntok; i++) {
         uint32_t r = rank[tok[i]];
         if (!T) q = put_varint(q, r);
@@ -550,7 +569,8 @@ static uint8_t *write_ranks(const uint32_t *tok, size_t ntok, const uint32_t *ra
 
 // precomputed ids: split into blocks of about p->block bytes
 static block *blocks_from_ids(const fot_vocab *v, const fot_params *p, size_t n, size_t *nb) {
-    block *B = calloc(p->nids + 1, sizeof(block));
+    if (!p->block) DIE("block size must be positive");
+    block *B = xcalloc(p->nids + 1, sizeof(block));
     size_t off = 0, i = 0;
     *nb = 0;
     while (i < p->nids) {
@@ -561,7 +581,7 @@ static block *blocks_from_ids(const fot_vocab *v, const fot_params *p, size_t n,
         }
         block *b = &B[(*nb)++];
         b->off = off; b->n = bytes; b->ntok = j - i;
-        b->tok = malloc((j - i) * 4 + 4);
+        b->tok = xmalloc((j - i) * 4 + 4);
         memcpy(b->tok, p->ids + i, (j - i) * 4);
         off += bytes;
         i = j;
@@ -581,22 +601,22 @@ int fot_encode(const fot_vocab *v, const fot_table *t, const fot_params *p, cons
     if (p->ids) B = blocks_from_ids(v, p, n, &nb);
     else { B = make_blocks(n, p->block, &nb); tokenize_blocks(v, t, p, in, B, nb); }
 
-    uint64_t *cnt = calloc(V, 8), ntok = 0;
+    uint64_t *cnt = xcalloc(V, 8), ntok = 0;
     for (size_t b = 0; b < nb; b++) {
         for (size_t i = 0; i < B[b].ntok; i++) cnt[B[b].tok[i]]++;
         ntok += B[b].ntok;
     }
-    uint32_t *sorted = malloc(V * 4), nseen = 0;
+    uint32_t *sorted = xmalloc(V * 4), nseen = 0;
     for (uint32_t i = 0; i < V; i++) if (cnt[i]) sorted[nseen++] = i;
     sort_by_count(sorted, nseen, cnt);
 
     int T = p->varint == FOT_VAR_LEB128 ? 0 : p->T, E = T ? min_E(V, T) : 0;
     if (T && (E < 0 || T < 1)) DIE("bad prefix threshold T=%d", T);
-    uint32_t *rank = malloc(V * 4);
+    uint32_t *rank = xmalloc(V * 4);
     uint32_t K = choose_K(t, p, cnt, sorted, nseen, V, T, E, rank);
 
-    uint8_t **bufs = malloc(nb * sizeof(uint8_t *));
-    size_t *blen = malloc(nb * sizeof(size_t));
+    uint8_t **bufs = xmalloc(nb * sizeof(uint8_t *));
+    size_t *blen = xmalloc(nb * sizeof(size_t));
     int nt = p->threads > 0 ? p->threads : 1;
     #pragma omp parallel for schedule(dynamic) num_threads(nt)
     for (size_t b = 0; b < nb; b++) {
@@ -606,7 +626,7 @@ int fot_encode(const fot_vocab *v, const fot_table *t, const fot_params *p, cons
 
     size_t total = 64 + (size_t)K * 5 + nb * 30;
     for (size_t b = 0; b < nb; b++) total += blen[b];
-    uint8_t *o = malloc(total), *q = o;
+    uint8_t *o = xmalloc(total), *q = o;
     uint32_t th = t ? t->hash : 0;
     memcpy(q, "FOT1", 4); q += 4;
     memcpy(q, &v->hash, 4); q += 4;
@@ -641,63 +661,81 @@ int fot_decode(const fot_vocab *v, const fot_table *t, int threads, const uint8_
     check_table(v, t);
     uint32_t T = *p++, E = *p++, n2 = T ? (256 - T - E) * 256 : 0;
     uint64_t total = get_varint(&p, end), nb = get_varint(&p, end), K = get_varint(&p, end);
-    if (K > V || (T && (E < 1 || T + E > 255))) DIE("corrupt header");
+    // every value below comes from the file: bound it before using it for sizes or indices
+    if (K > V || K > (uint64_t)(end - p) || nb > (uint64_t)(end - p) / 3 || (T && (E < 1 || T + E > 255)))
+        DIE("corrupt header");
 
-    uint32_t *listed = malloc(K * 4 + 4), *rank = malloc(V * 4), *r2id = malloc(V * 4);
-    for (uint64_t i = 0; i < K; i++)
-        if ((listed[i] = (uint32_t)get_varint(&p, end)) >= V) DIE("corrupt map");
+    uint32_t *listed = xcalloc(K + 1, 4), *rank = xmalloc(V * 4), *r2id = xmalloc(V * 4);
+    uint8_t *seen = xcalloc(V, 1);
+    for (uint64_t i = 0; i < K; i++) {
+        listed[i] = (uint32_t)get_varint(&p, end);
+        if (listed[i] >= V || seen[listed[i]]++) DIE("corrupt map");
+    }
+    free(seen);
     build_rank(t, listed, (uint32_t)K, rank, V);
     for (uint32_t i = 0; i < V; i++) r2id[rank[i]] = i;
     free(rank);
     free(listed);
 
-    block *B = calloc(nb + 1, sizeof(block));
-    size_t *soff = malloc((nb + 1) * sizeof(size_t));
-    uint64_t off = 0, so = 0;
+    block *B = xcalloc(nb + 1, sizeof(block));
+    size_t *soff = xmalloc((nb + 1) * sizeof(size_t));
+    uint64_t off = 0;
     for (uint64_t b = 0; b < nb; b++) {
         B[b].ntok = get_varint(&p, end);
-        soff[b] = get_varint(&p, end);
+        soff[b] = get_varint(&p, end);   // stream length of block b, turned into an offset below
         B[b].n = get_varint(&p, end);
+        // a token takes at least one stream byte and expands to at most maxlen bytes
+        if (B[b].n > total - off || B[b].ntok > soff[b] || B[b].n > B[b].ntok * (uint64_t)v->maxlen) DIE("corrupt block table");
         B[b].off = off;
         off += B[b].n;
     }
     if (off != total) DIE("corrupt block table");
-    for (uint64_t b = 0; b < nb; b++) { size_t l = soff[b]; soff[b] = so; so += l; }
-    if ((size_t)(p - in) + so != n) DIE("corrupt stream length");
+    uint64_t rem = (uint64_t)(end - p), so = 0;
+    for (uint64_t b = 0; b < nb; b++) {
+        size_t l = soff[b];
+        if (l > rem - so) DIE("corrupt stream length");
+        soff[b] = so;
+        so += l;
+    }
+    if (so != rem) DIE("corrupt stream length");
 
-    uint8_t *o = malloc(total + 16);
+    uint8_t *o = xmalloc(total + 16);
     int err = 0, nt = threads > 0 ? threads : 1;
     #pragma omp parallel for schedule(dynamic) num_threads(nt)
     for (uint64_t b = 0; b < nb; b++) {
         const uint8_t *s = p + soff[b], *se = b + 1 < nb ? p + soff[b + 1] : end;
         uint8_t *q = o + B[b].off, *qe = q + B[b].n;
-        for (size_t i = 0; i < B[b].ntok; i++) {
+        int bad = 0;
+        for (size_t i = 0; i < B[b].ntok && !bad; i++) {
             uint32_t r = 0;
-            if (s >= se) { err = 1; break; }
+            if (s >= se) { bad = 1; break; }
             if (!T) {
                 for (int sh = 0;; sh += 7) {
-                    if (s >= se || sh > 21) { err = 1; break; }
+                    if (s >= se || sh > 21) { bad = 1; break; }
                     uint32_t c = *s++;
                     r |= (c & 0x7f) << sh;
                     if (!(c & 0x80)) break;
                 }
-                if (err) break;
+                if (bad) break;
             } else {
                 uint32_t c = *s++, extra = c < T ? 0 : c < 256 - E ? 1 : 2;
-                if ((size_t)(se - s) < extra) { err = 1; break; }
+                if ((size_t)(se - s) < extra) { bad = 1; break; }
                 if (extra == 0) r = c;
                 else if (extra == 1) r = T + ((c - T) << 8 | *s++);
                 else { r = T + n2 + (((c - (256 - E)) << 16) | ((uint32_t)s[0] << 8) | s[1]); s += 2; }
             }
-            if (r >= V) { err = 1; break; }
+            if (r >= V) { bad = 1; break; }
             uint32_t id = r2id[r], l = v->lens[id];
             const uint8_t *tp = v->bytes + v->offs[id];
-            if (q + l > qe) { err = 1; break; }
+            if (l > (size_t)(qe - q)) { bad = 1; break; }
             if (l <= 16 && q + 16 <= qe) memcpy(q, tp, 16);   // fixed-size copy is faster; bytes has slack
             else memcpy(q, tp, l);
             q += l;
         }
-        if (q != qe || s != se) err = 1;
+        if (bad || q != qe || s != se) {
+            #pragma omp atomic write
+            err = 1;
+        }
     }
     free(B); free(soff); free(r2id);
     if (err) { free(o); DIE("corrupt stream"); }

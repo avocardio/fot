@@ -9,6 +9,8 @@ files shipped in vocab/. Requires tiktoken and numpy.
 import struct, sys
 import numpy as np, tiktoken
 
+if len(sys.argv) != 4:
+    sys.exit(__doc__)
 name, corpus, out = sys.argv[1:4]
 enc = tiktoken.get_encoding(name)
 tokens = sorted(enc._mergeable_ranks.items(), key=lambda kv: kv[1])
