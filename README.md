@@ -14,8 +14,15 @@ enwik8 (100 MB), one core, times include the transform:
 | zstd-22    | 25.33%     | 23.89%     | 86.8 s   | 17.2 s   |
 | brotli-11  | 25.74%     | 23.78%     | 170.8 s  | 94.5 s   |
 
-On enwik9, `fot` followed by xz (`--lzma2=preset=9e,lc=4,pb=0`, dictionary at least the stream size)
-gives 189,382,412 bytes.
+On enwik9, `fot` followed by xz (`--lzma2=preset=9e,lc=4,pb=0`, dictionary at least the stream size) gives
+189,382,412 bytes, or 189,923,156 including our decompressor, vocabulary and table, below every LZ-based entry on
+the [Large Text Compression Benchmark](https://mattmahoney.net/dc/text.html). The static table was learned from part
+of enwik9; the benchmark allows this because the table counts toward the decompressor size. To reproduce:
+
+```
+./fot enc -c none enwik9 enwik9.fot
+xz -k -T1 --lzma2=preset=9e,dict=512MiB,lc=4,pb=0 enwik9.fot
+```
 
 ## Build
 
@@ -49,6 +56,22 @@ The output is identical for any number of threads.
 - **Code.** Ranks 0–127 take one byte, the next 32,256 two bytes, the rest three bytes.
 
 `tools/make_vocab.py` regenerates the files in `vocab/` from tiktoken; `tools/bench.py` runs the benchmarks.
+
+## Paper
+
+M. Kalcher, *Frequency-Ordered Tokenization for Better Text Compression*,
+[arXiv:2602.22958](https://arxiv.org/abs/2602.22958).
+
+```bibtex
+@misc{kalcher2026fot,
+  title         = {Frequency-Ordered Tokenization for Better Text Compression},
+  author        = {Kalcher, Maximilian},
+  year          = {2026},
+  eprint        = {2602.22958},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.IT}
+}
+```
 
 ## License
 
